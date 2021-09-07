@@ -1,4 +1,4 @@
-# ETHERset
+# ETHERseg
 
 ## Dependencies
 
