@@ -6,9 +6,9 @@ import structure
 from subprogram import *
 from typing import List,Tuple
 
-class Program:
+class EtherSeg:
 
-    def get_blocks(self: Program) -> List[Tuple[int,int,BlockType,int]]:
+    def get_blocks(self: EtherSeg) -> List[Tuple[int,int,BlockType,int]]:
         ret = 0
         blocks = []
 
@@ -59,7 +59,7 @@ class Program:
             ret_blocks.append((last[1],len(self.code),BlockType.DATA,None))
         return ret_blocks
 
-    def pretty_print(self: Program) -> None:
+    def pretty_print(self: EtherSeg) -> None:
         b = self.get_blocks()
         if len(b) == 0:
             print(f"{hex(0)},{hex(len(self.code))},{BlockType.DATA},{None}")
@@ -75,14 +75,14 @@ class Program:
         for i in b:
             print(f"{hex(i[0])},{hex(i[1])},{i[2]}")
 
-    def __in_block(self: Program, block_start: (int,int,BlockType)) -> bool:
+    def __in_block(self: EtherSeg, block_start: (int,int,BlockType)) -> bool:
         for s in self.sub_programs:
             for b in [x for x in s.blocks if s.blocks[x].btype == BlockType.CODE]:
                 if s.blocks[b].true_start() <= block_start[0] < s.blocks[b].true_end():
                     return True
         return False
             
-    def __init__(self: Program, code: bytes):
+    def __init__(self: EtherSeg, code: bytes):
         self.code = code
         self.sub_programs = []
         self.structure = structure.decompose(code)

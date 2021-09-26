@@ -1,0 +1,228 @@
+\documentclass{article}
+
+\usepackage[english]{babel}
+
+\usepackage[a4paper,top=2cm,bottom=2cm,left=3cm,right=3cm,marginparwidth=1.75cm]{geometry}
+\usepackage{url}
+\usepackage{hyperref}
+\usepackage[utf8]{inputenc}
+\usepackage{listings}
+
+\title{ETHERseg: Code segmentation of Ethereum Bytecode}
+\author{Dallinger Hannes}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+    While Ethereum bytecode itself is simple by design, analysing it is not always trivial. This is because of the changes Ethereum has seen over the years and the way how improving compilers generate bytecode. This paper describes a heuristic for the first step of analysing the functionality of a smart contract, namely splitting the bytecode into sections of code and data.
+\end{abstract}
+
+
+\section[Introduction]{Introduction\footnote{Information till section 1.1 is taken from the Ethereum yellowpaper\cite{yellow_paper} except if stated otherwise}}
+    Ethereum is a decentralized blockchain containing a virtual maschine (EVM) for the execution of smart contracts. The Ethereum network consists of multiple nodes which hold a copy of the current state of the blockchain. New transactions request are broadcasted to the network. Every user of the network can then group multiple transactions into blocks and once a user created a proof of work for its block the block is added to the blockchain.
+\paragraph{}
+    A transaction can be created by accounts. Ethereum differentiates between two types of accounts:
+    \begin{itemize}
+        \item Simple Accounts, also called Externally Owned Accounts
+        \item Contracts
+    \end{itemize}
+\paragraph{}    
+    Simple accounts are accounts that are controlled by an external user, it may hold Ether, may send it to other accounts by creating a transaction and may invoke contracts.
+\paragraph{}
+    Contracts are a special type of account that has some key differences to a simple account. The biggest one is that it is not controlled by an external user but instead controlled by code. It remains inactive until the code is called as part of a transaction. The behaviour of the smart contract then depends on its code which gets executed by the EVM. Every contract has its own persistent storage used to save data between invocations of the contract.
+\paragraph{}
+    By default the code of a contract is immutable once deployed to the network but Ethereum gives its user a way to work around it. A contract can destroy itself using the SELFDESTRUCT opcode. Then a new code can be deployed to the same account using CREATE2. Furthermore the meaning of the code of a smart contract can change if changes are made to the EVM.
+\paragraph{}
+    The virtual maschine is stack based. The contracts for it are usually written in a higher languages like Solidity\cite{solidity} or Vyper\cite{vyper}. They are compiled into Ethereum bytecode which is understood by the EVM. During execution the contract also has access to a temporary memory to store data which is destroyed once execution finishes. 
+
+\paragraph{}
+    The deployed code of a contract does not have to contain executable code only. It often includes various types of data that can serve different purposes.
+
+\subsection{Code}
+
+    Code is the part of contract that is executed if the contract is called. It consists of different opcodes that are one byte in size. The only exception are PUSH instructions which are followed byup to 32 bytes of data. If a byte is encountered that does not correspond to an opcode the execution halts with an error.
+
+\paragraph{}
+    It is important to mention that not all smart contracts contain code. Some are exclusively made out of data. The data in these smart contracts can then used with by smart contracts.
+
+\subsubsection{Important Opcodes}
+    \label{opcodes}
+    \begin{itemize}
+        \item JUMP changes the program counter to the value of the stack on top.
+        \item JUMPI same as JUMP if the second value on the stack is non-zero. Otherwise it continues with the subsequent intstruction.
+        \item PUSH$X$ pushes $X$ bytes to the top of the stack where $X$ is a number between 1 and 16.
+        \item DUP$X$ duplicates the $X$-th value of the stack where $X$ is a number between 1 and 16.
+        \item SWAP$X$ swaps the $X+1$-th value of the stack with the top value where $X$ is a number between 1 and 16.
+        \item POP removes the top element of the stack.
+        \item ADD adds the top two elements of the stack.
+        \item AND executes a bitwise and on the top two elements of the stack.
+        \item STOP halts execution of the contract.
+        \item REVERT halts execution and reverts all changes done by the contract, it then returns data to the caller.
+        \item RETURN halts execution and returns data to the caller.
+        \item JUMPDEST does not do anything by itself but every jump by a JUMP or JUMPI instruction has to target a JUMPDEST.
+    \end{itemize}
+
+\subsection{Data}
+    Data sections are parts of the code that are not intended for direct execution, when the contract is called. We distinguish the following types of data.
+\subsubsection{Subcode}
+    In at least two situations, EVM bytecode has to handle data that itself is bytecode. First, if the bytecode is the deployment code of a contract,     it has to return the code of the contract to be deployed in memory. Second, if the contract contains CREATE instructions, then the deployment code for the contracts to be created also has to be provided in memory. Even though the code may be computed in arbitrarily complex ways, it is often done by placing the deployable code into the data section and copying it into memory. Therefore the code section starting a contract may be followed by further code sections that are not supposed to be executed by the contract.
+\subsubsection{Filler Data}
+    For reasons unknown to us, the Solidity compiler sometimes separates consecutive code/data sections by a few filler bytes, which are neither executed nor processed as data.
+\subsubsection{Metadata\cite{solidity:metadata}}
+    Metadata is present in programs that where written in solidity and compiled by the solidity compiler. Solidity adds CBOR-encoded meta-data to each contract that contains information about the Solidity versions as well as the location of the source code (if made available in a public repository). A contract may contain several sections of such meta-data, accompanying each contract deployed by the main code. 
+
+\section{Problem description}
+
+    The first step in analyzing Ethereum bytecode is to split a smart contract into its different parts. While this seems like an easy task at first, it is made non-trivial because of JUMP and JUMPI not having a clearly defined target, jumping to the top value on the stack instead which is often dependent on parameters that are not known while analyzing the code. While this gives the developer more freedom on how to decide where to jump, only limited by the requirement that all jumps have to target a JUMPDEST instruction.
+
+\paragraph{}
+    Additionally the task is made harder due to many bytecodes including the bytecode of other smart contracts as data. This kind of data differs from the main code only by the fact that many jumps not targe a JUMPDEST instruction.
+
+\paragraph{}
+    There is already a system to split a smart contract into its parts. It detects the start of subprograms by searching for combinations of instructions that are commonly used at the beginning of programs. It then identifies metadata and uses that information to divide it into its parts by marking everything from a codestart till either another codestart, the end of the program, or the start of metadata as code and everything between the end of metadata and the start of metadata or the start of a program as data. 
+\paragraph{}
+    While this old heuristic detects the different subprograms very well, it struggels at detecting data. Most of the errors come from it not detecting data the Solidity compiler places between code and metadata. It also does not detect any filler data.
+\paragraph{}
+    It is also prone to detecting too many subcodes, if common start patterns are used anywhere except for the beginning of a subcode, or to few subcodes, if a subcode does not start with a common start. It also fails on contracts that contain subcode that is in the middle of another subcode.
+\paragraph{}
+    The aim of the project is to create a system that better differentiates between code and data.
+
+\section{Program description}
+\label{description}
+    ETHERseg uses a limited form of symbolic execution to determine the flow of the program, combined with a heuristic to detect blocks of code that, due to missing information, were not found by the symbolic execution..
+\paragraph{}
+    The most important opcodes to execute are the ones mentioned in section \hyperref[opcodes]{``Important Opcodes''}, as they determine the flow of most programs. The effect of many opcodes is reduced to manipulating the stack. This is the case if the return value of the opcode cannot be determined easily which for example is the case for opcodes accessing the storage or the execution environment. In such cases all values the opcode would push to the stack are instead replaced by placeholder to indicate that the value is unknown.
+
+\subsection{Code Preparations}
+
+First the old heuristic is used to detect of program starts and ends as well as for detecting metadata within the bytecode. 
+
+The bytecode is then divided into basic blocks that have one entry and one exit. More precisely the code is split before all JUMPDEST instructions and after all jumps, all halting instructions and all invalid instructions that would cause a program crash. In each basic block of code the execution can take exactly one path once it enters the block.
+
+\label{code block example}
+\begin{lstlisting}[caption=code block example,basicstyle=\small]
+b0:
+    0x00    PUSH1 0x60
+    0x02    PUSH1 0x40
+    0x04    MSTORE
+    0x05    CALLVALUE
+b1:
+    0x06    JUMPDEST
+    0x07    ISZERO
+    0x08    PUSH1 0x0f
+    0x0a    JUMPI
+b2:
+    0x0b    PUSH1 0x00
+    0x0d    DUP1
+    0x0e    RETURN
+b3:
+    0x0f    JUMPDEST
+\end{lstlisting}
+
+\subsection{First Execution}
+\label{firstexec}
+    The instructions of the first block are executed with an empty stack to detect how the stack would look like after its execution. Which blocks get executed next depends on the stack and the last instruction of the block:
+\begin{itemize}
+    \item If the last opcode is JUMPI, and the stack contains a number at the position of the jump condition, then either the subsequent block or, if the target is known, the block at jump target is executed. If the target is unknown the execution of this branch stops. If the jumpcondition is unknown then both, the subsequent block and, if the jump target is known, the block at the jump target, are executed.
+    \item In case of a JUMP the execution either terminates or continues at the jump target depending on whether the target is known or not.
+    \item All halting or invalid instructions will result in the branch not being explored any further.
+    \item All other instruction will result in the subsequent block being executed.
+\end{itemize}
+
+    To avoid running into infinite loops every block saves the top values of the stack it was called with. If the block gets called with a stack that is already known then the branch terminates instead. While this precaution is sufficient for most programs there is still the possibility of an infinite loop if a part is called over and over again with slightly different stack values. In such a case execution stops after the block has been entered a certain number of times.
+\paragraph{}
+    If a block is executed successfully at least once, meaning it did not run into a stack underflow or jumped to an invalid destination, then the block is marked as ``execute''. 
+
+\paragraph{}
+    If this part is executed on the code in \hyperref[code block example]{Listing 1} then it would start by pushing 0x60 and 0x40 onto the stack. Both values are used immediately by MSTORE resulting in an empty stack. Then CALLVALUE should push the funds sent with the message to the stack, this is a value we cannot know therefor it instead pushes a placeholder onto the stack. Now the program is at the end of the first block, it marks the block as ``executed'' and, do to CALLVALUE not altering the execution flow, the subsequent block b1 one is checked next.
+\paragraph{}
+    The current stack is now saved so further executions will not result in a loop in case b1 is called again using the same stack. The following JUMPDEST does not change the stack and is therefor ignored. Now ISZERO pops the last value and checks if it is equal to zero, but the last value on the stack is unknown which results in ISZERO pushing another placeholder. The subsequent PUSH1 write 0x0f to stack and is followed by JUMPI. At this point the stack is [placeholder,0x0f] resulting in both, the block at 0x0f (b3) and the subsequent block b2 having to be explored with the latter terminating very quickly.
+
+\subsection{Secondary Executions}
+    Once all branches have terminated a heuristic looks at the remaining blocks for targets that can be used for secondary executions. All targets get called with a stack containing only placeholder values to check if further blocks can be found. Targets are all blocks that have not been executed, are within the boundaries of the first code block as detected by the old heuristic in \hyperref[firstexec]{``First Execution''} and are reachable, meaning it:
+    \begin{itemize}
+        \item starts with the instruction JUMPDEST or
+        \item the preceding block was executed and either ends in a JUMPI or an instruction that does not alter the control flow
+    \end{itemize}
+    and
+    \begin{itemize}
+        \item either ends with a halting opcode or
+        \item a JUMP ocode or
+        \item is followed by a block that fulfills these conditions.
+    \end{itemize}
+\subsection{Handling Subcode}
+    Finally the program is split at every start of a subcode the old heuristic returned provided it is not part of a block that was already executed. This creates new valid programs that originally were part of the data. These new programs are then executed again using the same system.
+\section{Evaluation}
+
+    The program was tested on 10000 bytecodes and the result \cite{result.csv} was compared to the output of the old heuristic using an automatic script with intresting cases being examined by hand.
+
+\subsection{Oddities}
+
+    Over time Ethereum underwent several changes that influence the way smart contracts look in bytecode. Furthermore, the compilers became better at optimizing the code, resulting in certain bytecodes including sections of code where it is not obvious why they were written that way.
+
+\begin{itemize}
+    \item 0,2,7 or the returnvalues of PC or ADDRESS as jump destination
+
+    Those values are often used as arguments for JUMP or JUMPI to terminate the program with an error. For this reason PC and ADDRESS push placeholder instructions to the stack. The heuristic treats 0,2,7 and placeholder values as valid arguments for both types of jump instructions. This means that a block is marked as executed even if the a block ends with a jump to one of those values.
+    
+    \item opcode 0xfe (INVALID)
+    
+    This opcode is often used within code to halt execution. For this reason the heuristic used to decide which blocks are used for secondary execution treats INVALID as a valid halting opcode.
+
+    \item INVALID, STOP, POP STOP, PUSH$X$ $X$ JUMP, POP PUSH$X$ $X$ JUMP 
+    
+    This opcodes/opcode combinations are often used as filler data. Since they are not reachable the heuristic marks them as data.
+
+    \item JUMPI with a garantied jumping condition, followed by INVALID or STOP 
+    
+    This combinations always jump to the target given to JUMPI and are therefor equivalent to a JUMP instruction.
+\end{itemize}
+
+\subsection{Evaluation}
+\label{eval}
+\begin{itemize}
+    \item For 3855 cases, both systems obtained the same correct results. (group ``equal'')
+    \item For 4163, cases the new system detected additional filler instructions that divide the code into sections, but which hold no data. (group ``onlyfiller'')
+    \item 1913 cases it detected at least one filler section but also a data block at the end of the code. (group ``almostequal'')
+    \item 4 cases were correctly marked as containing only data, marked as code by the old heuristic. (group ``onlydata'')
+    \item In 65 cases the result had a form that cannot be grouped into any of the above groups (group ``different'')
+
+    56 of those results were caused by the bytecode containing multiple subcodes which result in multiple big datablocks. But in all 56 cases ETHERseg correctly split the program. Another 4 are caused by the old heuristic detecting to many codestarts, which where correctly merged. The remaining 5 were split incorrectly.
+    This results in 9995 out of 10000 bytecodes being split correctly.
+
+
+    The 5 wrong results are because the heuristic used for identifying code starts not detecting codestarts do to them starting with uncommon codestarts.
+\end{itemize}
+\paragraph{}
+    ETHERseg is currently limited by the accuracy of the heuristic used to detect the start and end of each program. But that does not mean that the system would be flawless if it could reliably detect all codestarts and ends. In cases in which subprograms are surrounded by code of another program, code blocks that are not reached during the execution phase that are after the subprogram will never be detected because the heuristic detecting secondary execution only searches within the given program range. This is to prevent a large amount of blocks with a JUMPDEST as the block entry and either a jump to an unknown destination or halting instructions at its end to be marked as part of the subcode due to the heuristic, at that moment, not knowing if it may be part of another subcode.
+
+\section{Future Improvements}
+    The problems described in the previous section can be solved by adjusting parts of the program. 
+\paragraph{}    
+    To solve the problem of secondary executions being restricted to the subcode detected by the old heuristic, the step is instead moved to after all subcodes were executed once. This allows to inspect possible targets on a global scale. For example if a possible target for secondary executions ends with a jump with a defined target it can be checked for which subcodes this jump would hit a JUMPDEST. This combined with where the block is within the bytecode can be used to determine which subcode it belongs to.
+\paragraph{}
+    Fixing the missed code starts might be harder since updating the old heuristic to support more starting codepatterns might result in many of the found code starts being false positives. Instead a new step can be introduced that executes every block once. It then takes instructions that are not part of any blocks that are known to be subcodes and checks if multiple subsequent blocks end in jumps that target-JUMPDEST instruction if it is assumed that the unused instruction is the start of a new subcode. If that is the case it is likely that a new code start was found.
+\section{Usages}
+
+    One step often done while analysing Ethereum bytecode is to build a control flow graph (CFG)\cite{brent}\cite{krupp}\cite{zhou}. Do to subcode looking similar to the main code it is often interpreted as being code that is able to jump to the main code because jumps may target JUMPDEST instruction within the main code resulting in a CFG with branches that the main code is not able to reach. By first splitting it the subcodes can be removed from the bytecode which results in them no longer being able to pollute the result.
+\section{Materials}
+
+\subsection{Old Heuristic\cite{section.py}}
+    The old heuristic used to split Ethereum bytecode into its sections. It detects common code starts and metadata and uses this information to split the bytecode into code, data and metadata. It is also used for the comparison with the new implementation.
+\subsection{Implementation\cite{codeseg}}
+    An implementation of the heuristic as described in section \hyperref[description]{``Program description''}.
+\subsection{Results\cite{result.csv}}
+    The result of comparing the two heuristics including the test data used.
+    \begin{itemize}
+        \item codeid: The id of the code it was tested with.
+        \item account: The address of the contract the code was deployed to.
+        \item code: The code of the contract in hexadecimal.
+        \item group: Which group the result falls into as described in \hyperref[eval]{``Evaluation''}.
+        \item correct: Holds true or false depending on if the code was split into its parts correctly. 
+        \item info: Includes more information about the results. 
+    \end{itemize}
+\bibliographystyle{unsrt}
+\bibliography{res}
+
+\end{document}

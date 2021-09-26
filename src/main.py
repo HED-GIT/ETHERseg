@@ -1,8 +1,7 @@
 #!/usr/bin/python3
 
 import sys
-from program import *
-import structure
+from etherseg import *
 
 def drop0x(hex: str) -> str:
     return (None if hex is None else
@@ -19,7 +18,7 @@ def main() -> None:
             continue
         address = row[1]
         code = bytes.fromhex(drop0x(row[2]))
-        prog = Program(code)
+        prog = EtherSeg(code)
 
         prog.pretty_print()
 
